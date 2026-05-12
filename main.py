@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 INPUT_FILE = 'colleges_list.xlsx'
 OUTPUT_FILE = 'scraped_results.xlsx'
+DEFAULT_START_ROW = 1  # Edit this if you want the script to resume from a fixed row.
 
 # Drop the AICTE/AISHE/NIRF reference files in this folder with these names
 # (or update the paths below). Any one of .xlsx / .xls / .csv works.
@@ -332,11 +333,27 @@ def _is_empty(v):
 
 def _save_workbook(df, faculty_rows, output_file):
     """Write the main `Colleges` sheet and the `Faculty` sheet to one file."""
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Colleges', index=False)
-        if faculty_rows:
-            pd.DataFrame(faculty_rows).to_excel(
-                writer, sheet_name='Faculty', index=False)
+    candidates = [output_file]
+    base, ext = os.path.splitext(output_file)
+    candidates.append(f"{base}.partial{ext}")
+    candidates.append(f"{base}.{time.strftime('%Y%m%d-%H%M%S')}{ext}")
+
+    last_error = None
+    for path in candidates:
+        try:
+            with pd.ExcelWriter(path, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='Colleges', index=False)
+                if faculty_rows:
+                    pd.DataFrame(faculty_rows).to_excel(
+                        writer, sheet_name='Faculty', index=False)
+            if path != output_file:
+                print(f"  [save] output file was locked; wrote to {path}")
+            return path
+        except PermissionError as e:
+            last_error = e
+            continue
+
+    raise last_error
 
 
 def _fill_missing(dst_row, src):
@@ -349,13 +366,30 @@ def _fill_missing(dst_row, src):
     return filled
 
 
-def process_spreadsheet(input_file, output_file, limit=0):
+def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
     print(f"Reading {input_file}...")
     df = pd.read_excel(input_file, dtype=str)
+
+    # If we're rerunning into the same output file, reuse the saved Colleges
+    # sheet so rows before the resume point keep their previous values.
+    if os.path.exists(output_file):
+        try:
+            existing_df = pd.read_excel(output_file, sheet_name='Colleges', dtype=str)
+            if not existing_df.empty:
+                existing_df = existing_df.reindex(columns=df.columns, fill_value='')
+                overlap = min(len(df), len(existing_df))
+                if overlap:
+                    df.iloc[:overlap] = existing_df.iloc[:overlap].values
+                print(f"  [ok]   preloaded {overlap} rows from existing output")
+        except Exception:
+            pass
     
     if limit and limit > 0:
         df = df.iloc[:limit]
         print(f"Limited to first {limit} rows")
+
+    if start_row and start_row > 1:
+        print(f"Resuming from row {start_row}")
 
     print("\nLoading reference files (drop them next to main.py to enable):")
     aicte_path = _first_existing(AICTE_FILE_CANDIDATES)
@@ -409,6 +443,11 @@ def process_spreadsheet(input_file, output_file, limit=0):
             pass
 
     for index, row in df.iterrows():
+        row_no = index + 1
+        if start_row and row_no < start_row:
+            stats['skipped'] += 1
+            continue
+
         college = row.get('College Name')
         state = row.get('State')
 
@@ -699,6 +738,8 @@ if __name__ == "__main__":
                         help=f'Output file (default: {OUTPUT_FILE})')
     parser.add_argument('--limit', type=int, default=0, 
                         help='Process only the first N rows')
+    parser.add_argument('--start-row', type=int, default=DEFAULT_START_ROW,
+                        help=f'Start processing from this 1-based data row (default: {DEFAULT_START_ROW})')
     args = parser.parse_args()
     
-    process_spreadsheet(args.input, args.output, limit=args.limit)
+    process_spreadsheet(args.input, args.output, limit=args.limit, start_row=args.start_row)
