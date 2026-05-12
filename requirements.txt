@@ -1,0 +1,7 @@
+pandas
+requests
+beautifulsoup4
+rapidfuzz
+ddgs
+openpyxl
+pdfplumber

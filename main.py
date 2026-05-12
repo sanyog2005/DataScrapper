@@ -2,6 +2,7 @@ import os
 import re
 import time
 import warnings
+import argparse
 
 import pandas as pd
 import requests
@@ -348,9 +349,13 @@ def _fill_missing(dst_row, src):
     return filled
 
 
-def process_spreadsheet(input_file, output_file):
+def process_spreadsheet(input_file, output_file, limit=0):
     print(f"Reading {input_file}...")
     df = pd.read_excel(input_file, dtype=str)
+    
+    if limit and limit > 0:
+        df = df.iloc[:limit]
+        print(f"Limited to first {limit} rows")
 
     print("\nLoading reference files (drop them next to main.py to enable):")
     aicte_path = _first_existing(AICTE_FILE_CANDIDATES)
@@ -587,7 +592,7 @@ def process_spreadsheet(input_file, output_file):
                 crawl_url = get_website_url(college, state)
             df.at[index, 'Website Found'] = str(crawl_url) if crawl_url else 'Not Found'
             if crawl_url:
-                text, visited = aggregators.crawl_official_site(crawl_url)
+                text, visited = aggregators.crawl_official_site(crawl_url, max_pages=6)
                 if text:
                     extracted = aggregators.extract_contacts_from_text(text)
                     filled = []
@@ -685,4 +690,15 @@ def process_spreadsheet(input_file, output_file):
 
 
 if __name__ == "__main__":
-    process_spreadsheet(INPUT_FILE, OUTPUT_FILE)
+    parser = argparse.ArgumentParser(
+        description='Extract college details: URLs, contacts, emails, phones, faculty.'
+    )
+    parser.add_argument('--input', default=INPUT_FILE, 
+                        help=f'Input file (default: {INPUT_FILE})')
+    parser.add_argument('--output', default=OUTPUT_FILE, 
+                        help=f'Output file (default: {OUTPUT_FILE})')
+    parser.add_argument('--limit', type=int, default=0, 
+                        help='Process only the first N rows')
+    args = parser.parse_args()
+    
+    process_spreadsheet(args.input, args.output, limit=args.limit)

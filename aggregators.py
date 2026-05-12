@@ -8,6 +8,7 @@ then fetch and parse it.
 This module intentionally has no dependency on main.py so it can be reused
 by other scripts.
 """
+import html
 import json
 import re
 import time
@@ -349,6 +350,40 @@ def _email_belongs_to_domain(email, domain):
     if not email or not domain:
         return False
     return email.lower().endswith('@' + domain) or email.lower().endswith('.' + domain)
+
+
+def _normalize_contact_text(text):
+    """Decode common email obfuscation patterns before running regexes.
+
+    Handles bracketed/entity forms such as example[dot]name[at]domain[dot]com,
+    plus normal HTML entity variants like &#64; and &#46;.
+    """
+    if not text:
+        return ''
+    s = html.unescape(str(text))
+    s = s.replace('\u00a0', ' ')
+    s = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)|\{\s*at\s*\}', '@', s, flags=re.I)
+    s = re.sub(r'\[\s*dot\s*\]|\(\s*dot\s*\)|\{\s*dot\s*\}', '.', s, flags=re.I)
+    s = re.sub(r'\[\s*underscore\s*\]|\(\s*underscore\s*\)|\{\s*underscore\s*\}', '_', s, flags=re.I)
+    s = re.sub(r'\[\s*hyphen\s*\]|\(\s*hyphen\s*\)|\{\s*hyphen\s*\}', '-', s, flags=re.I)
+    s = re.sub(r'\s*@\s*', '@', s)
+    s = re.sub(r'(?<=\w)\s*\.\s*(?=\w)', '.', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
+def _collect_link_contacts(soup):
+    """Collect mailto/tel values from a page and return them as plain text."""
+    if not soup:
+        return ''
+    parts = []
+    for a in soup.find_all('a', href=True):
+        href = a['href'].strip()
+        if href.lower().startswith('mailto:'):
+            parts.append(href[7:])
+        elif href.lower().startswith('tel:'):
+            parts.append(href[4:])
+    return ' '.join(parts)
 
 
 def extract_admin_contact(text, homepage_url=None):
@@ -812,7 +847,7 @@ def _fetch(url, timeout=8):
     return None
 
 
-def crawl_official_site(url, max_pages=2, timeout=8, delay=0.2):
+def crawl_official_site(url, max_pages=6, timeout=8, delay=0.2):
     """Fetch the homepage + a few contact-ish sub-pages and return the combined
     page text along with the list of URLs we successfully visited.
     """
@@ -825,8 +860,18 @@ def crawl_official_site(url, max_pages=2, timeout=8, delay=0.2):
         return combined_text, pages_visited
     if 'html' not in r.headers.get('content-type', '').lower():
         return combined_text, pages_visited
-    soup = BeautifulSoup(r.content, 'html.parser')
-    combined_text = soup.get_text(separator=' ', strip=True)
+    # Parse homepage text (use .text to let requests handle encoding)
+    try:
+        soup = BeautifulSoup(r.text, 'html.parser')
+    except Exception:
+        # Fall back to raw bytes if text decoding/parsing fails
+        try:
+            soup = BeautifulSoup(r.content, 'html.parser')
+        except Exception:
+            return combined_text, pages_visited
+    combined_text = _normalize_contact_text(
+        soup.get_text(separator=' ', strip=True) + ' ' + _collect_link_contacts(soup)
+    )
     pages_visited.append(r.url)
 
     for sub_url in _find_subpages(r.url, soup, max_pages=max_pages):
@@ -834,8 +879,21 @@ def crawl_official_site(url, max_pages=2, timeout=8, delay=0.2):
         sr = _fetch(sub_url, timeout=timeout)
         if sr is None or sr.status_code != 200:
             continue
-        ssoup = BeautifulSoup(sr.content, 'html.parser')
-        combined_text += '\n\n' + ssoup.get_text(separator=' ', strip=True)
+        # Skip non-HTML responses (PDFs, images, downloads, etc.)
+        ctype = (sr.headers.get('content-type') or '').lower()
+        if 'html' not in ctype:
+            continue
+        # Parse safely, preferring decoded text
+        try:
+            ssoup = BeautifulSoup(sr.text, 'html.parser')
+        except Exception:
+            try:
+                ssoup = BeautifulSoup(sr.content, 'html.parser')
+            except Exception:
+                continue
+        combined_text += '\n\n' + _normalize_contact_text(
+            ssoup.get_text(separator=' ', strip=True) + ' ' + _collect_link_contacts(ssoup)
+        )
         pages_visited.append(sr.url)
 
     return combined_text, pages_visited
@@ -848,6 +906,7 @@ def extract_contacts_from_text(text):
     out = {}
     if not text:
         return out
+    text = _normalize_contact_text(text)
     email_re = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     phone_re = r'(?:\+91[- ]?|0)?[6-9]\d{9}\b|\(?\d{2,4}\)?[- ]?\d{6,8}\b'
     emails = sorted(set(re.findall(email_re, text)))
