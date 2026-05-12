@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.data.gov.in)",
+      "WebFetch(domain:aishe.gov.in)",
+      "WebSearch",
+      "PowerShell(venv\\\\Scripts\\\\python.exe fetch_aicte.py)",
+      "PowerShell(venv\\\\Scripts\\\\python.exe test_match.py)",
+      "PowerShell(venv\\\\Scripts\\\\python.exe -c \"import pandas as pd; df = pd.read_excel\\('colleges_list.xlsx', dtype=str\\); [print\\(repr\\(df.iloc[i]['College Name']\\)\\) for i in range\\(15\\)]\")"
+    ]
+  }
+}

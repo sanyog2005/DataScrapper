@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(venv\\\\Scripts\\\\python.exe -c \"import pandas as pd; df = pd.read_excel\\('colleges_list.xlsx', dtype=str\\); print\\('Shape:', df.shape\\); print\\('Columns:', list\\(df.columns\\)\\); print\\(df.head\\(5\\).to_string\\(\\)\\)\")",
+      "WebFetch(domain:www.aicte-india.org)"
+    ]
+  }
+}
