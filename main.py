@@ -377,6 +377,8 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
             existing_df = pd.read_excel(output_file, sheet_name='Colleges', dtype=str)
             if not existing_df.empty:
                 existing_df = existing_df.reindex(columns=df.columns, fill_value='')
+                # Replace NaN with empty strings so they don't overwrite initialized columns
+                existing_df = existing_df.fillna('')
                 overlap = min(len(df), len(existing_df))
                 if overlap:
                     df.iloc[:overlap] = existing_df.iloc[:overlap].values
@@ -455,7 +457,15 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
             continue
 
         # Skip rows that already have a Source recorded (resume support)
+        # BUT still fill in Website Found if it's missing
         if not _is_empty(row.get('Source')):
+            if _is_empty(df.at[index, 'Website Found']):
+                crawl_url = get_website_url(college, state)
+                df.at[index, 'Website Found'] = str(crawl_url) if crawl_url else 'Not Found'
+                if crawl_url:
+                    stats.setdefault('url_lookup', 0)
+                    stats['url_lookup'] += 1
+                    print(f"[{index + 1}/{len(df)}] {college} - [URL-ONLY] {crawl_url}")
             stats['skipped'] += 1
             continue
 
@@ -691,7 +701,6 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
             if ddg_url:
                 stats.setdefault('url_lookup', 0)
                 stats['url_lookup'] += 1
-                print(f"  [URL]   {ddg_url}")
             time.sleep(0.3)
 
         # 5. Final pass: infer District from Location if District is still
