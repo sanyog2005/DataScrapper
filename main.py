@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ---------------------------------------------------------------------------
 
 INPUT_FILE = 'colleges_list.xlsx'
-OUTPUT_FILE = 'scraped_results.xlsx'
+OUTPUT_FILE = 'backup.xlsx'
 DEFAULT_START_ROW = 1  # Edit this if you want the script to resume from a fixed row.
 
 # Drop the AICTE/AISHE/NIRF reference files in this folder with these names
@@ -43,6 +43,10 @@ TARGET_FIELDS = ['District', 'Location', 'Stream', 'Approx Strength',
 # Additional leadership-contact columns (Director / Principal / HOD etc.)
 # Populated by aggregators.extract_admin_contact() from crawled site text.
 CONTACT_FIELDS = ['Contact Name', 'Contact Role', 'Contact Email']
+# Placement-cell contact columns. Populated by visiting the college's own
+# placement / TPO / CDC page (subdomain or /placement path).
+PLACEMENT_FIELDS = ['Placement Officer Name', 'Placement Officer Phone',
+                    'Placement Officer Email']
 
 # Header-name candidates for auto-detecting columns in the reference files.
 # We match case-insensitively as a substring against the actual header text.
@@ -425,7 +429,7 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
         print("    AISHE: " + " | ".join(AISHE_FILE_CANDIDATES))
 
     # Ensure all output columns exist and accept text
-    for col in TARGET_FIELDS + CONTACT_FIELDS + ['Source', 'Website Found']:
+    for col in TARGET_FIELDS + CONTACT_FIELDS + PLACEMENT_FIELDS + ['Source', 'Website Found']:
         if col not in df.columns:
             df[col] = ''
         df[col] = df[col].astype(object)
@@ -703,6 +707,34 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
                 stats['url_lookup'] += 1
             time.sleep(0.3)
 
+        # 4d. Placement-officer lookup. Visits the college's own
+        # /placement, /tpo, /cdc page (or `placement.<domain>` subdomain) and
+        # extracts the Placement Officer's name + email + phone. Only runs
+        # when we have a Website Found URL to start from, and the placement
+        # email column is still empty (resume-safe).
+        if (not _is_empty(df.at[index, 'Website Found'])
+                and _is_empty(df.at[index, 'Placement Officer Email'])
+                and _is_empty(df.at[index, 'Placement Officer Phone'])):
+            site_url = df.at[index, 'Website Found']
+            if site_url and site_url != 'Not Found':
+                pl = aggregators.find_placement_contact(site_url)
+                if pl:
+                    filled_pl = []
+                    if pl.get('name') and _is_empty(df.at[index, 'Placement Officer Name']):
+                        df.at[index, 'Placement Officer Name'] = pl['name']
+                        filled_pl.append('Name')
+                    if pl.get('phone') and _is_empty(df.at[index, 'Placement Officer Phone']):
+                        df.at[index, 'Placement Officer Phone'] = pl['phone']
+                        filled_pl.append('Phone')
+                    if pl.get('email') and _is_empty(df.at[index, 'Placement Officer Email']):
+                        df.at[index, 'Placement Officer Email'] = pl['email']
+                        filled_pl.append('Email')
+                    if filled_pl:
+                        sources_used.append('Placement')
+                        stats.setdefault('placement', 0)
+                        stats['placement'] += 1
+                        print(f"  [PL]    filled={filled_pl} email={pl.get('email','-')}")
+
         # 5. Final pass: infer District from Location if District is still
         # empty and we have an address string to work with.
         if _is_empty(df.at[index, 'District']) and not _is_empty(df.at[index, 'Location']):
@@ -731,6 +763,7 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
     print(f"  CollegeDunia matches: {stats['collegedunia']}")
     print(f"  Web fallbacks:        {stats['web']}")
     print(f"  URL lookups:          {stats.get('url_lookup', 0)}")
+    print(f"  Placement contacts:   {stats.get('placement', 0)}")
     print(f"  Unresolved:           {stats['none']}")
     print(f"  Skipped (had Source): {stats['skipped']}")
     print(f"  Faculty rows on Sheet 2: {len(faculty_rows)}")

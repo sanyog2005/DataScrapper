@@ -733,6 +733,180 @@ def parse_nirf_pdf(pdf_bytes):
     return out or None
 
 
+# ---------------------------------------------------------------------------
+# Placement Officer extraction — find Name / Phone / Email from each college's
+# placement / training-placement / TPO / CDC page.
+# ---------------------------------------------------------------------------
+
+# Common placement-page paths to try off the homepage. The subdomain
+# `placement.<bare-domain>` is also tried separately.
+_PLACEMENT_PATHS = [
+    '/placement', '/placements', '/placement-cell', '/placement_cell',
+    '/training-placement', '/training-and-placement', '/training_and_placement',
+    '/tpo', '/t-p-o', '/cdc', '/career-cell', '/career_cell',
+    '/career-development-cell', '/careers', '/placement-overview',
+]
+
+# Email local-parts that strongly suggest this is the placement-cell address.
+# Score these higher than the generic admin@ / info@ that appears on every page.
+_PLACEMENT_LOCAL_PARTS = (
+    'placementofficer', 'placement_officer', 'placement-officer',
+    'placement', 'placements', 'tpo', 'training_placement',
+    'trainingplacement', 'careers', 'career', 'cdc', 'placementcell',
+    'placement_cell', 'jobs', 'recruitment', 'pld',
+)
+
+# Regex to pull a person's name immediately following a placement-role keyword.
+# Honorific is required so we don't grab random capitalised words.
+_PLACEMENT_OFFICER_RE = re.compile(
+    r'\b(?:Training\s*(?:and|&|&)?\s*Placement\s*Officer|'
+    r'Placement\s*Officer|TPO|'
+    r'Head\s*(?:of)?\s*Placement|Placement\s*Head|'
+    r'Placement\s*(?:Cell\s*)?Coordinator|Placement\s*Coordinator|'
+    rf'Chairman\s*[,-]?\s*(?:Career|Placement))\s*[:\-,]?\s+'
+    rf"(?:Dr\.?|Prof\.?|Mr\.?|Mrs\.?|Ms\.?|Shri\.?|Smt\.?)\s+"
+    rf"((?:[A-Z]\.|[A-Z][A-Za-z']+)"
+    rf"(?:\s+(?!(?:{_POC_STOPWORDS})\b)(?:[A-Z]\.|[A-Z][A-Za-z']+)){{0,4}})",
+    re.I,
+)
+
+
+def _placement_subdomain_url(homepage_url):
+    """Given e.g. https://www.iiti.ac.in/, return https://placement.iiti.ac.in/."""
+    from urllib.parse import urlparse
+    if not homepage_url:
+        return None
+    try:
+        u = urlparse(homepage_url)
+        host = (u.hostname or '').lower()
+        if not host:
+            return None
+        # Drop www. then prepend placement.
+        if host.startswith('www.'):
+            host = host[4:]
+        scheme = u.scheme or 'https'
+        return f'{scheme}://placement.{host}/'
+    except Exception:
+        return None
+
+
+def _score_placement_email(email):
+    """Lower scores rank earlier. Placement-specific local parts win; generic
+    admin/info emails lose; gmail/yahoo only used as last resort."""
+    if not email or '@' not in email:
+        return 100
+    local = email.split('@', 1)[0].lower()
+    if any(p in local for p in _PLACEMENT_LOCAL_PARTS):
+        return 0  # best: e.g. placementofficer@, tpo@
+    if any(g in email.lower() for g in ('@gmail.', '@yahoo.', '@hotmail.', '@outlook.')):
+        return 3
+    if local in _GENERIC_EMAIL_PREFIXES:
+        return 2  # generic admin@, info@
+    return 1      # any other domain email
+
+
+def find_placement_contact(homepage_url, max_pages=3, timeout=8):
+    """Return {name, phone, email} for the placement officer of a college, by
+    visiting the placement subdomain + common placement page paths off the
+    homepage. Any field can be empty if not found. Returns None if no
+    placement page was reachable at all.
+    """
+    if not homepage_url:
+        return None
+    from urllib.parse import urljoin
+
+    # Build the list of URLs to try, in order of likelihood.
+    tries = []
+    sub = _placement_subdomain_url(homepage_url)
+    if sub:
+        tries.append(sub)
+    for path in _PLACEMENT_PATHS:
+        tries.append(urljoin(homepage_url, path))
+    # Dedup while preserving order
+    seen = set()
+    ordered = []
+    for u in tries:
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+
+    combined_text = ''
+    visited = 0
+    for u in ordered:
+        if visited >= max_pages:
+            break
+        r = _fetch(u, timeout=timeout)
+        if r is None or r.status_code != 200:
+            continue
+        ct = r.headers.get('content-type', '').lower()
+        if 'html' not in ct:
+            continue
+        try:
+            soup = BeautifulSoup(r.content, 'html.parser')
+        except Exception:
+            continue
+        # If the page redirects to the homepage / is too short, it isn't a real
+        # placement page — skip without counting against the budget.
+        text = soup.get_text(separator=' ', strip=True)
+        if len(text) < 400:
+            continue
+        text_lower = text.lower()
+        if not any(kw in text_lower for kw in (
+                'placement', 'training', 'tpo', 'recruit', 'career', 'cdc')):
+            continue
+        combined_text += '\n\n' + text
+        visited += 1
+
+    if not combined_text:
+        return None
+
+    out = {'name': '', 'phone': '', 'email': ''}
+    text = re.sub(r'\s+', ' ', combined_text)
+
+    # Placement-officer name
+    m = _PLACEMENT_OFFICER_RE.search(text)
+    if m:
+        candidate = m.group(1).strip()
+        if _is_plausible_name(candidate):
+            out['name'] = candidate
+
+    # Best email candidate — rank by placement-related local part
+    emails = sorted(set(_EMAIL_RE_GLOBAL.findall(text)))
+    emails = [e for e in emails if not _is_junk_email(e)]
+    if emails:
+        emails.sort(key=_score_placement_email)
+        if _score_placement_email(emails[0]) <= 1:
+            out['email'] = emails[0]
+
+    # Best phone candidate — Indian mobile or landline near a placement keyword.
+    phone_pat = re.compile(
+        r'(?:\+91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}\b|\(?0\d{2,4}\)?[\s-]?\d{6,8}\b'
+    )
+    # Restrict to phone numbers found within 300 chars of a placement keyword.
+    candidates = []
+    for kw_match in re.finditer(r'\b(?:placement|training|tpo|cdc|recruit)',
+                                text, re.I):
+        win_start = max(0, kw_match.start() - 50)
+        win_end = min(len(text), kw_match.end() + 300)
+        for pm in phone_pat.finditer(text[win_start:win_end]):
+            candidates.append(pm.group(0))
+    if candidates:
+        # Strip dup whitespace / dashes
+        cleaned = []
+        seen_p = set()
+        for p in candidates:
+            p = re.sub(r'\s+', ' ', p).strip()
+            if p not in seen_p:
+                seen_p.add(p)
+                cleaned.append(p)
+        out['phone'] = ', '.join(cleaned[:2])
+
+    # Only return the dict if we got at least one non-empty field.
+    if any(out.values()):
+        return out
+    return None
+
+
 def name_similarity(query_name, matched_name):
     """Return a 0-100 token-sort similarity score between two college names."""
     if not query_name or not matched_name:
