@@ -319,8 +319,8 @@ def scrape_college_data(url):
         page_text = soup.get_text(separator=' ')
         emails, phones = _extract_emails_and_phones(page_text)
         return {
-            'Email ID':     ', '.join(emails[:2]) if emails else '',
-            'Phone Number': ', '.join(phones[:2]) if phones else '',
+            'Email ID':     ', '.join(emails) if emails else '',
+            'Phone Number': ', '.join(phones) if phones else '',
         }
     except Exception as e:
         print(f"  [!] Scrape failed: {e}")
@@ -335,8 +335,28 @@ def _is_empty(v):
     return pd.isna(v) or str(v).strip() == ''
 
 
+_ILLEGAL_XLSX_CHARS_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
+
+
+def _sanitize_for_excel(v):
+    """Remove control chars that openpyxl rejects in worksheet cells."""
+    if isinstance(v, str):
+        return _ILLEGAL_XLSX_CHARS_RE.sub('', v)
+    return v
+
+
+def _sanitize_dataframe_for_excel(df):
+    """Apply Excel-safe string sanitization across all cells."""
+    if df is None or df.empty:
+        return df
+    return df.apply(lambda col: col.map(_sanitize_for_excel))
+
+
 def _save_workbook(df, faculty_rows, output_file):
     """Write the main `Colleges` sheet and the `Faculty` sheet to one file."""
+    safe_df = _sanitize_dataframe_for_excel(df)
+    safe_faculty_df = _sanitize_dataframe_for_excel(pd.DataFrame(faculty_rows))
+
     candidates = [output_file]
     base, ext = os.path.splitext(output_file)
     candidates.append(f"{base}.partial{ext}")
@@ -346,9 +366,9 @@ def _save_workbook(df, faculty_rows, output_file):
     for path in candidates:
         try:
             with pd.ExcelWriter(path, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='Colleges', index=False)
-                if faculty_rows:
-                    pd.DataFrame(faculty_rows).to_excel(
+                safe_df.to_excel(writer, sheet_name='Colleges', index=False)
+                if not safe_faculty_df.empty:
+                    safe_faculty_df.to_excel(
                         writer, sheet_name='Faculty', index=False)
             if path != output_file:
                 print(f"  [save] output file was locked; wrote to {path}")
@@ -713,8 +733,9 @@ def process_spreadsheet(input_file, output_file, limit=0, start_row=1):
         # when we have a Website Found URL to start from, and the placement
         # email column is still empty (resume-safe).
         if (not _is_empty(df.at[index, 'Website Found'])
-                and _is_empty(df.at[index, 'Placement Officer Email'])
-                and _is_empty(df.at[index, 'Placement Officer Phone'])):
+            and (_is_empty(df.at[index, 'Placement Officer Name'])
+                 or _is_empty(df.at[index, 'Placement Officer Email'])
+                 or _is_empty(df.at[index, 'Placement Officer Phone']))):
             site_url = df.at[index, 'Website Found']
             if site_url and site_url != 'Not Found':
                 pl = aggregators.find_placement_contact(site_url)

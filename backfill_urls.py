@@ -12,6 +12,7 @@ The script:
   4. Preserves the Faculty sheet untouched.
 """
 import os
+import re
 import time
 
 import pandas as pd
@@ -25,6 +26,21 @@ def _is_empty_url(v):
         return True
     s = str(v).strip()
     return not s or s.lower() in {'not found', 'nan', '-'}
+
+
+_ILLEGAL_XLSX_CHARS_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
+
+
+def _sanitize_for_excel(v):
+    if isinstance(v, str):
+        return _ILLEGAL_XLSX_CHARS_RE.sub('', v)
+    return v
+
+
+def _sanitize_dataframe_for_excel(df):
+    if df is None or df.empty:
+        return df
+    return df.apply(lambda col: col.map(_sanitize_for_excel))
 
 
 def main_loop():
@@ -68,17 +84,21 @@ def main_loop():
 
         # Checkpoint every 25 rows so a crash doesn't lose progress.
         if i % 25 == 0:
+            safe_df = _sanitize_dataframe_for_excel(df)
+            safe_faculty_df = _sanitize_dataframe_for_excel(faculty_df)
             with pd.ExcelWriter(INPUT_OUTPUT, engine='openpyxl') as w:
-                df.to_excel(w, sheet_name='Colleges', index=False)
-                if faculty_df is not None:
-                    faculty_df.to_excel(w, sheet_name='Faculty', index=False)
+                safe_df.to_excel(w, sheet_name='Colleges', index=False)
+                if safe_faculty_df is not None:
+                    safe_faculty_df.to_excel(w, sheet_name='Faculty', index=False)
             print(f'  ...checkpoint saved')
         time.sleep(0.4)
 
+    safe_df = _sanitize_dataframe_for_excel(df)
+    safe_faculty_df = _sanitize_dataframe_for_excel(faculty_df)
     with pd.ExcelWriter(INPUT_OUTPUT, engine='openpyxl') as w:
-        df.to_excel(w, sheet_name='Colleges', index=False)
-        if faculty_df is not None:
-            faculty_df.to_excel(w, sheet_name='Faculty', index=False)
+        safe_df.to_excel(w, sheet_name='Colleges', index=False)
+        if safe_faculty_df is not None:
+            safe_faculty_df.to_excel(w, sheet_name='Faculty', index=False)
     print(f'\nDone. Filled {filled} URLs, marked {failed} as Not Found.')
 
 

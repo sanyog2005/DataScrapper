@@ -16,6 +16,7 @@ Usage:
 """
 import argparse
 import os
+import re
 import time
 
 import pandas as pd
@@ -31,6 +32,21 @@ PLACEMENT_FIELDS = ['Placement Officer Name',
 
 def _is_empty(v):
     return pd.isna(v) or str(v).strip() == ''
+
+
+_ILLEGAL_XLSX_CHARS_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
+
+
+def _sanitize_for_excel(v):
+    if isinstance(v, str):
+        return _ILLEGAL_XLSX_CHARS_RE.sub('', v)
+    return v
+
+
+def _sanitize_dataframe_for_excel(df):
+    if df is None or df.empty:
+        return df
+    return df.apply(lambda col: col.map(_sanitize_for_excel))
 
 
 def main():
@@ -66,8 +82,9 @@ def main():
         url = row.get('Website Found')
         if _is_empty(url) or str(url).strip().lower() == 'not found':
             continue
-        # Skip rows that already have any of the placement fields filled
-        if not all(_is_empty(row.get(c)) for c in PLACEMENT_FIELDS):
+        # Skip rows only if all placement fields are already filled.
+        # If any field is missing, still process to backfill the rest.
+        if all(not _is_empty(row.get(c)) for c in PLACEMENT_FIELDS):
             continue
         todo.append(index)
         if args.limit and len(todo) >= args.limit:
@@ -105,17 +122,21 @@ def main():
             print(f'[{i}/{len(todo)}] row {index + 1} {str(college)[:50]:50s} -> (no placement page)')
 
         if i % 25 == 0:
+            safe_df = _sanitize_dataframe_for_excel(df)
+            safe_faculty_df = _sanitize_dataframe_for_excel(faculty_df)
             with pd.ExcelWriter(INPUT_OUTPUT, engine='openpyxl') as w:
-                df.to_excel(w, sheet_name='Colleges', index=False)
-                if faculty_df is not None:
-                    faculty_df.to_excel(w, sheet_name='Faculty', index=False)
+                safe_df.to_excel(w, sheet_name='Colleges', index=False)
+                if safe_faculty_df is not None:
+                    safe_faculty_df.to_excel(w, sheet_name='Faculty', index=False)
             print('  ...checkpoint saved')
         time.sleep(0.4)
 
+    safe_df = _sanitize_dataframe_for_excel(df)
+    safe_faculty_df = _sanitize_dataframe_for_excel(faculty_df)
     with pd.ExcelWriter(INPUT_OUTPUT, engine='openpyxl') as w:
-        df.to_excel(w, sheet_name='Colleges', index=False)
-        if faculty_df is not None:
-            faculty_df.to_excel(w, sheet_name='Faculty', index=False)
+        safe_df.to_excel(w, sheet_name='Colleges', index=False)
+        if safe_faculty_df is not None:
+            safe_faculty_df.to_excel(w, sheet_name='Faculty', index=False)
     print(f'\nDone. Filled placement contact info on {filled} rows.')
 
 

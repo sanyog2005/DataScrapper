@@ -743,8 +743,11 @@ def parse_nirf_pdf(pdf_bytes):
 _PLACEMENT_PATHS = [
     '/placement', '/placements', '/placement-cell', '/placement_cell',
     '/training-placement', '/training-and-placement', '/training_and_placement',
-    '/tpo', '/t-p-o', '/cdc', '/career-cell', '/career_cell',
-    '/career-development-cell', '/careers', '/placement-overview',
+    '/training-placement-cell', '/training_and_placement_cell',
+    '/tpo', '/t-p-o', '/tnp', '/tnp-cell', '/cdc',
+    '/career-cell', '/career_cell', '/career-development-cell', '/careers',
+    '/placement-overview', '/placement/contact', '/placements/contact',
+    '/internship', '/industry-interface', '/corporate-relations',
 ]
 
 # Email local-parts that strongly suggest this is the placement-cell address.
@@ -768,6 +771,29 @@ _PLACEMENT_OFFICER_RE = re.compile(
     rf"((?:[A-Z]\.|[A-Z][A-Za-z']+)"
     rf"(?:\s+(?!(?:{_POC_STOPWORDS})\b)(?:[A-Z]\.|[A-Z][A-Za-z']+)){{0,4}})",
     re.I,
+)
+
+# Fallback pattern for sites that omit honorifics.
+_PLACEMENT_OFFICER_FALLBACK_RE = re.compile(
+    r'\b(?:Training\s*(?:and|&)\s*Placement\s*Officer|'
+    r'Placement\s*Officer|TPO|'
+    r'Head\s*(?:of)?\s*Placement|Placement\s*Head|'
+    r'Placement\s*(?:Cell\s*)?Coordinator|Placement\s*Coordinator)\s*[:\-,]?\s+'
+    r'((?:[A-Z][A-Za-z\']{1,})(?:\s+[A-Z][A-Za-z\']{1,}){1,4})',
+    re.I,
+)
+
+_PLACEMENT_KEYWORDS_RE = re.compile(
+    r'(placement|training|tpo|tnp|cdc|recruit|career|internship|corporate)',
+    re.I,
+)
+
+# External hosts that are commonly linked from footers/nav but are not useful
+# for extracting on-site placement-cell contacts.
+_PLACEMENT_EXTERNAL_HOST_BLOCKLIST = (
+    'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'linkedin.com',
+    'youtube.com', 'wa.me', 'whatsapp.com', 't.me', 'telegram.me',
+    'maps.google.', 'google.com/maps', 'goo.gl',
 )
 
 
@@ -805,7 +831,7 @@ def _score_placement_email(email):
     return 1      # any other domain email
 
 
-def find_placement_contact(homepage_url, max_pages=3, timeout=8):
+def find_placement_contact(homepage_url, max_pages=6, timeout=10):
     """Return {name, phone, email} for the placement officer of a college, by
     visiting the placement subdomain + common placement page paths off the
     homepage. Any field can be empty if not found. Returns None if no
@@ -813,7 +839,7 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
     """
     if not homepage_url:
         return None
-    from urllib.parse import urljoin
+    from urllib.parse import urljoin, urlparse
 
     # Build the list of URLs to try, in order of likelihood.
     tries = []
@@ -822,6 +848,28 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
         tries.append(sub)
     for path in _PLACEMENT_PATHS:
         tries.append(urljoin(homepage_url, path))
+
+    # Also discover candidate links from the homepage nav/footer itself.
+    hr = _fetch(homepage_url, timeout=timeout)
+    if hr is not None and hr.status_code == 200 and 'html' in hr.headers.get('content-type', '').lower():
+        try:
+            hsoup = BeautifulSoup(hr.content, 'html.parser')
+            base_host = (urlparse(homepage_url).hostname or '').lower().lstrip('www.')
+            for a in hsoup.find_all('a', href=True):
+                href = (a.get('href') or '').strip()
+                if not href or href.startswith(('mailto:', 'tel:', 'javascript:')):
+                    continue
+                label = (a.get_text(separator=' ', strip=True) or '').lower()
+                hay = (label + ' ' + href.lower())
+                if not _PLACEMENT_KEYWORDS_RE.search(hay):
+                    continue
+                full = urljoin(homepage_url, href)
+                host = (urlparse(full).hostname or '').lower().lstrip('www.')
+                if host and any(bad in host for bad in _PLACEMENT_EXTERNAL_HOST_BLOCKLIST):
+                    continue
+                tries.append(full)
+        except Exception:
+            pass
     # Dedup while preserving order
     seen = set()
     ordered = []
@@ -848,11 +896,10 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
         # If the page redirects to the homepage / is too short, it isn't a real
         # placement page — skip without counting against the budget.
         text = soup.get_text(separator=' ', strip=True)
-        if len(text) < 400:
+        if len(text) < 120:
             continue
         text_lower = text.lower()
-        if not any(kw in text_lower for kw in (
-                'placement', 'training', 'tpo', 'recruit', 'career', 'cdc')):
+        if not _PLACEMENT_KEYWORDS_RE.search(text_lower):
             continue
         combined_text += '\n\n' + text
         visited += 1
@@ -869,14 +916,20 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
         candidate = m.group(1).strip()
         if _is_plausible_name(candidate):
             out['name'] = candidate
+    if not out['name']:
+        m2 = _PLACEMENT_OFFICER_FALLBACK_RE.search(text)
+        if m2:
+            candidate = m2.group(1).strip()
+            if _is_plausible_name(candidate):
+                out['name'] = candidate
 
     # Best email candidate — rank by placement-related local part
     emails = sorted(set(_EMAIL_RE_GLOBAL.findall(text)))
     emails = [e for e in emails if not _is_junk_email(e)]
     if emails:
         emails.sort(key=_score_placement_email)
-        if _score_placement_email(emails[0]) <= 1:
-            out['email'] = emails[0]
+        if _score_placement_email(emails[0]) <= 2:
+            out['email'] = ', '.join(emails)
 
     # Best phone candidate — Indian mobile or landline near a placement keyword.
     phone_pat = re.compile(
@@ -890,6 +943,9 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
         win_end = min(len(text), kw_match.end() + 300)
         for pm in phone_pat.finditer(text[win_start:win_end]):
             candidates.append(pm.group(0))
+    if not candidates:
+        for pm in phone_pat.finditer(text):
+            candidates.append(pm.group(0))
     if candidates:
         # Strip dup whitespace / dashes
         cleaned = []
@@ -899,7 +955,7 @@ def find_placement_contact(homepage_url, max_pages=3, timeout=8):
             if p not in seen_p:
                 seen_p.add(p)
                 cleaned.append(p)
-        out['phone'] = ', '.join(cleaned[:2])
+        out['phone'] = ', '.join(cleaned)
 
     # Only return the dict if we got at least one non-empty field.
     if any(out.values()):
@@ -1103,9 +1159,9 @@ def extract_contacts_from_text(text):
     emails.sort(key=_email_rank)
     phones = sorted(set(re.findall(phone_re, text)))
     if emails:
-        out['Email ID'] = ', '.join(emails[:2])
+        out['Email ID'] = ', '.join(emails)
     if phones:
-        out['Phone Number'] = ', '.join(phones[:2])
+        out['Phone Number'] = ', '.join(phones)
 
     for pat in _POC_PATTERNS:
         m = pat.search(text)
